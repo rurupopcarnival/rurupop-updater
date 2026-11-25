@@ -277,6 +277,10 @@
     return { scene: sc.start, idx: 0, s: 0, f: 0, st, vis, choice: {}, dice: {}, log: [], ended: null, sparkOrder: [], fateOrder: [] };
   }
   function clone(o) { return JSON.parse(JSON.stringify(o)); }
+  // 検証用の軽量コピー（ログ類は持ち回らない）
+  function fastClone(o) {
+    return { scene: o.scene, idx: o.idx, s: o.s, f: o.f, st: { ...o.st }, vis: { ...o.vis }, choice: { ...o.choice }, dice: { ...o.dice }, log: [], ended: o.ended, sparkOrder: [], fateOrder: [] };
+  }
 
   function termVal(sc, state, t) {
     if (t.k === 'num') return t.v;
@@ -311,7 +315,7 @@
   }
 
   // 次の「決定」（SPARK・FATE・END）まで進める。pages を集めて返す
-  function advance(sc, state, warn) {
+  function advance(sc, state, warn, quiet) {
     const pages = [];
     let guard = 0;
     while (true) {
@@ -319,7 +323,7 @@
       const s = sc.scenes[state.scene];
       while (state.idx < s.items.length) {
         const it = s.items[state.idx++];
-        if (it.type === 'page') { const t = renderText(sc, state, it.text); if (t.trim()) pages.push(t); }
+        if (it.type === 'page') { if (quiet) continue; const t = renderText(sc, state, it.text); if (t.trim()) pages.push(t); }
         else if (it.type === 'show') state.vis[it.name] = true;
         else if (it.type === 'hide') state.vis[it.name] = false;
         else if (it.type === 'effect') applyEffects(sc, state, it.effects, null, warn);
@@ -367,11 +371,44 @@
     }
     return atoms;
   }
+  // 分岐条件で参照されるステータス（それ以外は進行に影響しない）
+  function flowStats(sc) {
+    const set = new Set();
+    for (const name of sc.order) {
+      const nx = sc.scenes[name].next;
+      if (!nx || nx.type !== 'branch') continue;
+      for (const r of nx.rules) if (r.cond) for (const a of r.cond.or.flat()) for (const t of [a.l, a.r]) if (t.k === 'status') set.add(t.v);
+    }
+    return set;
+  }
+  // 場面ごとに「この先の分岐条件で読まれうる」ステータス・履歴（生存解析）
+  function liveSets(sc) {
+    const own = {}, succ = {}, live = {};
+    const hk = (t) => (t.k === 'choice' || t.k === 'dice') ? `${t.k === 'choice' ? 'c' : 'd'}:${sc.alias[t.v] || t.v}` : null;
+    for (const name of sc.order) {
+      const nx = sc.scenes[name].next, o = new Set(), su = new Set();
+      if (nx) {
+        if (nx.target) su.add(nx.target);
+        for (const r of nx.rules || []) { su.add(r.target); if (r.cond) for (const a of r.cond.or.flat()) for (const t of [a.l, a.r]) { if (t.k === 'status') o.add('s:' + t.v); const h = hk(t); if (h) o.add(h); } }
+        for (const c of nx.choices || []) su.add(c.target);
+        for (const b of nx.bands || []) su.add(b.target);
+      }
+      own[name] = o; succ[name] = [...su].filter((x) => sc.scenes[x]); live[name] = new Set(o);
+    }
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const name of sc.order) for (const x of succ[name]) for (const v of live[x]) if (!live[name].has(v)) { live[name].add(v); changed = true; }
+    }
+    return live;
+  }
+  function stKey(st, rel) { const o = {}; for (const k in st) if (rel.has(k)) o[k] = st[k]; return JSON.stringify(o); }
   function flip(op) { return { '>=': '<=', '<=': '>=', '>': '<', '<': '>' }[op] || op; }
   function cmp(l, op, r) { switch (op) { case '>=': return l >= r; case '<=': return l <= r; case '>': return l > r; case '<': return l < r; case '!=': return l !== r; default: return l === r; } }
-  function historyKey(sc, atoms, state) {
+  function historyKey(sc, atoms, state, lv) {
     const parts = [];
     for (const k in atoms) {
+      if (lv && !lv.has(k)) { parts.push('-'); continue; }
       const [t, scene] = [k[0], k.slice(2)];
       const v = (t === 'c' ? state.choice[scene] : state.dice[scene]) || 0;
       parts.push(atoms[k] === 'exact' ? v : atoms[k].map((a) => (cmp(v, a.op, a.n) ? 1 : 0)).join(''));
@@ -388,22 +425,36 @@
     const boundWarn = (e, kind) => addWarn(`b${e.line}${kind}`, `${e.line}行目：ステータス「${e.name}」が${kind === 'min' ? '下限' : '上限'}を超える可能性があります（自動で範囲内に調整されます）`);
     const memo = new Map();
 
-    const atoms = flowClasses(sc);
+    const atoms = flowClasses(sc), live = liveSets(sc), relOf = {};
+    for (const n of sc.order) relOf[n] = new Set([...live[n]].filter((x) => x.startsWith('s:')).map((x) => x.slice(2)));
     function key(state, normalOK) {
-      return `${state.scene}|${state.idx}|${state.s}|${state.f}|${JSON.stringify(state.st)}|${historyKey(sc, atoms, state)}|${normalOK ? 1 : 0}`;
+      return `${state.scene}|${state.idx}|${state.s}|${state.f}|${stKey(state.st, relOf[state.scene])}|${historyKey(sc, atoms, state, live[state.scene])}|${normalOK ? 1 : 0}`;
+    }
+    // 進行に影響しないステータスは状態キーから外す。範囲超過の警告を取りこぼさないよう、
+    // 同じ状態でも「これまでより小さい／大きい値」で来た場合だけ再探索する（効果は単調なので最小・最大で十分）。
+    function within(m, st, scene) {
+      const rel = relOf[scene];
+      let ok = true;
+      for (const k in st) if (!rel.has(k)) {
+        if (!(k in m.lo) || st[k] < m.lo[k]) { m.lo[k] = st[k]; ok = false; }
+        if (!(k in m.hi) || st[k] > m.hi[k]) { m.hi[k] = st[k]; ok = false; }
+      }
+      return ok;
     }
     // 戻り値：{ ending名: ルート数 }
     function explore(state, path, normalOK) {
       if (R.aborted) return {};
       state.trail = [state.scene];
-      const r = advance(sc, state, boundWarn);
+      const r = advance(sc, state, boundWarn, true);
       for (const t of state.trail) {
         R.reachable.add(t); if (normalOK) R.normalReachable.add(t);
         (R.arrivals[t] ||= new Set()).add(`S${state.s}/F${state.f}`);
       }
       delete state.trail;
       const k = key(state, normalOK);
-      if (memo.has(k)) return memo.get(k);
+      let m = memo.get(k);
+      if (m) { if (within(m, state.st, state.scene)) return m.res; }
+      else { m = { res: null, lo: {}, hi: {} }; within(m, state.st, state.scene); memo.set(k, m); }
       if (++R.statesVisited > limit) { R.aborted = true; return {}; }
       const here = state.scene;
       let res = {};
@@ -416,17 +467,17 @@
       } else if (r.type === 'spark') {
         if (state.s >= sc.rules.S) { addErr(`ovS${here}`, `場面「${here}」で ${state.s + 1} 回目のSPARKが発生するルートがあります（規定 ${sc.rules.S} 回）`, path); }
         else r.node.choices.forEach((c, i) => {
-          const ns = clone(state); chooseSpark(sc, ns, i, boundWarn);
+          const ns = fastClone(state); chooseSpark(sc, ns, i, boundWarn);
           path.push(`${here}:${i + 1}`); merge(res, explore(ns, path, normalOK)); path.pop();
         });
       } else if (r.type === 'fate') {
         if (state.f >= sc.rules.F) { addErr(`ovF${here}`, `場面「${here}」で ${state.f + 1} 回目のFATEが発生するルートがあります（規定 ${sc.rules.F} 回）`, path); }
         else for (let v = 1; v <= 9; v++) {
-          const ns = clone(state); confirmFate(sc, ns, v, boundWarn);
+          const ns = fastClone(state); confirmFate(sc, ns, v, boundWarn);
           path.push(`${here}:${v}`); merge(res, explore(ns, path, normalOK && v <= 6)); path.pop();
         }
       }
-      memo.set(k, res);
+      m.res = res;
       return res;
     }
     function merge(a, b) { for (const k in b) a[k] = (a[k] || 0) + b[k]; }
@@ -445,16 +496,17 @@
 
   // 結末ごとの出やすさ（選択肢は均等に選ぶと仮定、ダイスは lo〜hi が均等）
   function endingOdds(sc, lo = 1, hi = 6) {
-    const atoms = flowClasses(sc), memo = new Map();
+    const atoms = flowClasses(sc), live = liveSets(sc), relOf = {}, memo = new Map();
+    for (const n of sc.order) relOf[n] = new Set([...live[n]].filter((x) => x.startsWith('s:')).map((x) => x.slice(2)));
     function rec(state) {
-      const r = advance(sc, state);
-      const k = `${state.scene}|${state.idx}|${state.s}|${state.f}|${JSON.stringify(state.st)}|${historyKey(sc, atoms, state)}`;
+      const r = advance(sc, state, null, true);
+      const k = `${state.scene}|${state.idx}|${state.s}|${state.f}|${stKey(state.st, relOf[state.scene])}|${historyKey(sc, atoms, state, live[state.scene])}`;
       if (memo.has(k)) return memo.get(k);
       let res = {};
       const add = (b, w) => { for (const x in b) res[x] = (res[x] || 0) + b[x] * w; };
       if (r.type === 'end') res = { [r.title]: 1 };
-      else if (r.type === 'spark') r.node.choices.forEach((c, i) => { const ns = clone(state); chooseSpark(sc, ns, i); add(rec(ns), 1 / r.node.choices.length); });
-      else if (r.type === 'fate') for (let v = lo; v <= hi; v++) { const ns = clone(state); confirmFate(sc, ns, v); add(rec(ns), 1 / (hi - lo + 1)); }
+      else if (r.type === 'spark') r.node.choices.forEach((c, i) => { const ns = fastClone(state); chooseSpark(sc, ns, i); add(rec(ns), 1 / r.node.choices.length); });
+      else if (r.type === 'fate') for (let v = lo; v <= hi; v++) { const ns = fastClone(state); confirmFate(sc, ns, v); add(rec(ns), 1 / (hi - lo + 1)); }
       memo.set(k, res);
       return res;
     }

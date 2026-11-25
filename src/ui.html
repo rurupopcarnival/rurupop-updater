@@ -125,11 +125,13 @@ $('previewBtn').onclick = async () => {
   const btn = $('previewBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span>確認中…';
   resetPreview();
   const j = await api('/api/preview', { method: 'POST', body: formData() });
-  btn.disabled = false; btn.textContent = '3. 内容を確認する';
-  const p = $('preview'); p.classList.remove('hidden');
+  const p = $('preview');
   const t = j.target || target;
-  // 台本の全ルート検証はブラウザで行う
+  // 台本の全ルート検証はブラウザで行う（台本によっては十数秒かかる）
+  if ((j.scripts || []).length) { btn.innerHTML = '<span class="spin"></span>台本を全ルート検証中…（少しかかります）'; await new Promise((r) => setTimeout(r, 50)); }
   const scr = (j.scripts || []).map(checkScript);
+  btn.disabled = false; btn.textContent = '3. 内容を確認する';
+  p.classList.remove('hidden');
   if (scr.some((x) => x.errors.length)) (j.fatal = j.fatal || []).push('台本の全ルート検証でエラーが見つかりました（下の赤い表示）。');
   const blocked = (j.fatal || []).length > 0, none = !blocked && j.changes === 0;
   digest = blocked || none ? null : j.digest;
@@ -149,7 +151,7 @@ $('previewBtn').onclick = async () => {
 
 function checkScript(f) {
   const sc = E.parse(f.text);
-  const R = E.validate(sc, { limit: 2000000 });
+  const R = E.validate(sc, { limit: 5000000 });
   const errors = R.errors.map((e) => e.msg + (e.path && e.path.length ? `（例：${e.path.join(' → ')}）` : ''));
   if (R.aborted) errors.push('全ルートの検証が最後まで終わりませんでした。ネロに相談してください。');
   const n = E.endingOdds(sc, 1, 6), m = E.endingOdds(sc, 4, 9);
