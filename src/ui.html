@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>RuruPop 更新ツール</title>
+<style>
+:root{--bg:#f4f2f8;--card:#fff;--ink:#26233a;--sub:#6b6780;--line:#e2ddee;--ok:#178a5c;--err:#cc3d3d;--warn:#b07800;--accent:#26233a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP","Yu Gothic UI",sans-serif}
+.wrap{max-width:760px;margin:0 auto;padding:18px 16px 60px}
+header{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+header h1{font-size:19px;margin:0}
+header .who{margin-left:auto;font-size:12px;color:var(--sub)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:12px}
+.step{font-size:12px;font-weight:700;color:var(--sub);letter-spacing:.06em;margin-bottom:8px}
+.targets{display:grid;gap:8px}
+.target{display:flex;align-items:center;gap:12px;border:2px solid var(--line);border-radius:12px;padding:12px;cursor:pointer;background:#fff;text-align:left;width:100%;font:inherit;color:inherit;min-height:56px}
+.target .bar{width:8px;align-self:stretch;border-radius:4px;flex:none}
+.target b{display:block;font-size:16px}
+.target small{color:var(--sub)}
+.target[aria-pressed=true]{border-color:var(--c);box-shadow:0 0 0 3px color-mix(in srgb,var(--c) 18%,transparent)}
+.drop{display:block;border:2px dashed var(--line);border-radius:12px;padding:22px 14px;text-align:center;cursor:pointer;color:var(--sub)}
+.drop.has{border-style:solid;color:var(--ink)}
+.drop input{display:none}
+.btn{display:inline-block;border:0;border-radius:12px;padding:13px 18px;font:inherit;font-weight:700;font-size:16px;cursor:pointer;background:var(--accent);color:#fff;width:100%;min-height:48px}
+.btn.sub{background:#fff;color:var(--ink);border:1px solid var(--line);font-weight:400}
+.btn:disabled{opacity:.35;cursor:default}
+.banner{border-radius:12px;padding:12px 14px;color:#fff;margin-bottom:10px}
+.banner small{display:block;opacity:.9}
+.banner b{font-size:18px}
+.msg{border-left:4px solid;border-radius:8px;padding:9px 12px;margin:8px 0;white-space:pre-wrap}
+.msg.e{border-color:var(--err);background:#fff2f2}
+.msg.ok{border-color:var(--ok);background:#ecf8f2}
+.msg.w{border-color:var(--warn);background:#fff8e6}
+table{width:100%;border-collapse:collapse;font-size:14px}
+td{border-top:1px solid var(--line);padding:6px 4px;vertical-align:top}
+td.p{word-break:break-all}
+.chip{display:inline-block;font-size:12px;border-radius:6px;padding:1px 7px;white-space:nowrap}
+.chip.add{background:#e5f6ee;color:var(--ok)} .chip.mod{background:#eef0ff;color:#4652d6} .chip.same{background:#f1f0f4;color:var(--sub)} .chip.del{background:#fff0f0;color:var(--err)}
+.meta{font-size:14px;color:var(--sub);margin:4px 0 10px}
+.hist{font-size:13px}
+.hist td:first-child{white-space:nowrap;color:var(--sub);width:1%}
+.hidden{display:none!important}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:sp .8s linear infinite;vertical-align:-2px;margin-right:6px}
+@keyframes sp{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation:none}}
+:focus-visible{outline:3px solid #5b6cff;outline-offset:2px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><h1>RuruPop 更新ツール</h1><span class="who" id="who"></span></header>
+
+  <div class="card">
+    <div class="step">1. 更新先を選ぶ</div>
+    <div class="targets" id="targets"><p class="meta">読み込み中…</p></div>
+  </div>
+
+  <div class="card">
+    <div class="step">2. 受け取ったZIPファイルを選ぶ</div>
+    <label class="drop" id="drop"><input type="file" id="zip" accept=".zip,application/zip"><span id="zipName">ここをタップしてZIPを選ぶ（ドラッグ＆ドロップも可）</span></label>
+    <button class="btn" id="previewBtn" style="margin-top:12px" disabled>3. 内容を確認する</button>
+  </div>
+
+  <div class="card hidden" id="preview"></div>
+  <div class="card hidden" id="result"></div>
+
+  <div class="card" id="historyCard">
+    <div class="step">最近の更新（選んだ更新先）</div>
+    <div id="history" class="hist"><p class="meta">更新先を選ぶと表示されます。</p></div>
+  </div>
+</div>
+
+<script>
+{
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = (iso) => { try { return new Date(iso).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch { return iso; } };
+let TARGETS = [], target = null, file = null, digest = null, pollTimer = null;
+
+async function api(path, opts) {
+  const r = await fetch(path, { credentials: 'same-origin', ...opts });
+  const j = await r.json().catch(() => ({ ok: false, fatal: [`通信エラー（${r.status}）`] }));
+  return j;
+}
+(async () => {
+  const j = await api('/api/targets');
+  TARGETS = j.targets || [];
+  $('who').textContent = j.user ? `ログイン中：${j.user}` : '';
+  $('targets').innerHTML = TARGETS.map((t) => `<button class="target" style="--c:${esc(t.color)}" data-id="${esc(t.id)}" aria-pressed="false"><span class="bar" style="background:${esc(t.color)}"></span><span><b>${esc(t.name)}</b><small>${esc(t.site)}</small></span></button>`).join('');
+  $('targets').querySelectorAll('.target').forEach((b) => b.onclick = () => selectTarget(b.dataset.id));
+  if (TARGETS.length === 1) selectTarget(TARGETS[0].id);
+})();
+
+function selectTarget(id) {
+  target = TARGETS.find((t) => t.id === id);
+  $('targets').querySelectorAll('.target').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.id === id)));
+  resetPreview(); updateButtons(); loadHistory();
+}
+function resetPreview() { digest = null; $('preview').classList.add('hidden'); $('result').classList.add('hidden'); stopPoll(); }
+function updateButtons() { $('previewBtn').disabled = !(target && file); }
+
+$('zip').onchange = () => setFile($('zip').files[0]);
+const drop = $('drop');
+['dragover', 'dragenter'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('has'); }));
+drop.addEventListener('drop', (e) => { e.preventDefault(); if (e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]); });
+function setFile(f) {
+  file = f || null;
+  $('zipName').textContent = file ? `📦 ${file.name}（${Math.ceil(file.size / 1024)}KB）` : 'ここをタップしてZIPを選ぶ（ドラッグ＆ドロップも可）';
+  drop.classList.toggle('has', !!file);
+  resetPreview(); updateButtons();
+}
+function formData() { const fd = new FormData(); fd.append('target', target.id); fd.append('zip', file); if (digest) fd.append('digest', digest); return fd; }
+
+const chip = (s) => `<span class="chip ${s === '追加' ? 'add' : s === '変更' ? 'mod' : s === '削除' ? 'del' : 'same'}">${esc(s)}</span>`;
+$('previewBtn').onclick = async () => {
+  const btn = $('previewBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span>確認中…';
+  resetPreview();
+  const j = await api('/api/preview', { method: 'POST', body: formData() });
+  btn.disabled = false; btn.textContent = '3. 内容を確認する';
+  const p = $('preview'); p.classList.remove('hidden');
+  const t = j.target || target;
+  const blocked = (j.fatal || []).length > 0, none = !blocked && j.changes === 0;
+  digest = blocked || none ? null : j.digest;
+  p.innerHTML = `<div class="step">4. 内容を確かめて反映する</div>
+    <div class="banner" style="background:${esc(t.color)}"><small>更新先</small><b>${esc(t.name)}</b><small>${esc(t.site || '')}</small></div>
+    ${j.title ? `<div><b>${esc(j.title)}</b></div>` : ''}<div class="meta">${j.from ? `作成：${esc(j.from)}　` : ''}${j.note ? esc(j.note) : ''}</div>
+    ${(j.fatal || []).map((m) => `<div class="msg e">${esc(m)}</div>`).join('')}
+    ${(j.checks || []).map((m) => `<div class="msg ok">${esc(m)}</div>`).join('')}
+    ${(j.files || []).length || (j.deletes || []).length ? `<table>${(j.files || []).map((f) => `<tr><td>${chip(f.state)}</td><td class="p">${esc(f.path)}</td></tr>`).join('')}${(j.deletes || []).map((d) => `<tr><td>${chip(d.state === '削除' ? '削除' : '変更なし')}</td><td class="p">${esc(d.path)}${d.state !== '削除' ? '（もともとありません）' : ''}</td></tr>`).join('')}</table>` : ''}
+    ${none ? '<div class="msg w">いまの内容と同じため、反映するものはありません。</div>' : ''}
+    ${blocked ? '<div class="msg e">上の問題があるため、反映できません。ZIPを作った人に確認してください。</div>' : ''}
+    <button class="btn" id="applyBtn" style="margin-top:12px;background:${esc(t.color)}" ${digest ? '' : 'disabled'}>「${esc(t.name)}」に ${j.changes || 0} 件を反映する</button>`;
+  if (digest) $('applyBtn').onclick = applyNow;
+  p.scrollIntoView({ behavior: 'smooth', block: 'start' });
+};
+
+async function applyNow() {
+  const btn = $('applyBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span>反映中…';
+  const j = await api('/api/apply', { method: 'POST', body: formData() });
+  const r = $('result'); r.classList.remove('hidden');
+  if (!j.ok) {
+    btn.textContent = '反映できませんでした';
+    r.innerHTML = `<div class="step">結果</div>${(j.fatal || ['反映できませんでした。']).map((m) => `<div class="msg e">${esc(m)}</div>`).join('')}<p class="meta">サイトは変更されていません。</p>`;
+    return;
+  }
+  btn.textContent = '反映しました';
+  digest = null;
+  r.innerHTML = `<div class="step">結果</div>
+    <div class="msg ok">GitHubに反映しました（${j.changes}件）。続けて自動で公開されます。</div>
+    <div id="deploy" class="msg w"><span class="spin"></span>公開の準備中…（1〜3分ほどかかります）</div>
+    <p class="meta">記録：<a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.commit.slice(0, 7))}</a>（${fmt(j.at)}）</p>`;
+  r.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  pollDeploy(j.commit.slice(0, 7), Date.now());
+}
+
+function stopPoll() { clearTimeout(pollTimer); pollTimer = null; }
+async function pollDeploy(sha, started) {
+  stopPoll();
+  const j = await api('/api/status?target=' + encodeURIComponent(target.id));
+  drawHistory(j);
+  const box = $('deploy'); if (!box) return;
+  if (!j.builds) { box.className = 'msg w'; box.textContent = 'デプロイ状況はこのツールでは確認できない設定です。Cloudflareの画面で確認してください。'; return; }
+  const b = j.builds.find((x) => x.commit === sha);
+  if (b && b.status === 'stopped') {
+    if (b.outcome === 'success') { box.className = 'msg ok'; box.textContent = `✅ 公開が完了しました（${target.site}）。`; }
+    else { box.className = 'msg e'; box.textContent = '❌ 公開に失敗しました。サイトは前の状態のままです。ネロに連絡してください。'; }
+    return;
+  }
+  if (Date.now() - started > 6 * 60e3) { box.className = 'msg w'; box.textContent = '時間がかかっています。しばらくしてから下の「最近の更新」で結果を確認してください。'; return; }
+  box.innerHTML = `<span class="spin"></span>${b ? 'ビルド・公開中…' : '公開の準備中…'}（1〜3分ほどかかります）`;
+  pollTimer = setTimeout(() => pollDeploy(sha, started), 6000);
+}
+async function loadHistory() { $('history').innerHTML = '<p class="meta">読み込み中…</p>'; drawHistory(await api('/api/status?target=' + encodeURIComponent(target.id))); }
+function drawHistory(j) {
+  if (!j || !j.ok) { $('history').innerHTML = '<p class="meta">取得できませんでした。</p>'; return; }
+  const res = (c) => { const b = (j.builds || []).find((x) => x.commit === c.sha); if (!b) return j.builds ? '—' : ''; if (b.status !== 'stopped') return '公開中…'; return b.outcome === 'success' ? '✅ 公開済み' : '❌ 失敗'; };
+  $('history').innerHTML = (j.commits || []).length ? `<table>${j.commits.map((c) => `<tr><td>${esc(fmt(c.at))}</td><td>${esc(c.title)}</td><td style="white-space:nowrap">${res(c)}</td></tr>`).join('')}</table>` : `<p class="meta">${esc(j.commitsError || 'まだ更新はありません。')}</p>`;
+}
+}
+</script>
+</body>
+</html>

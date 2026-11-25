@@ -1,0 +1,8 @@
+{
+  "name": "rurupop-updater",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "node build.mjs", "dev": "node build.mjs && wrangler dev", "deploy": "node build.mjs && wrangler deploy" },
+  "dependencies": { "fflate": "0.8.2" },
+  "devDependencies": { "wrangler": "^4.168.0" }
+}
