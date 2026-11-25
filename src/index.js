@@ -117,27 +117,27 @@ async function inspect(env, form) {
   const deletes = del.filter((p) => typeof p === 'string').map((p) => ({ path: p, state: current.has(p) ? '削除' : '（もともとない）' }));
 
   // 更新先ごとの検証
-  const checks = [];
+  const checks = [], scripts = [];
   if (!fatal.length && target.check === 'fates-scenarios') {
     for (const f of files) {
       const id = f.path.split('/').pop().replace(/\.txt$/, '');
       if (!/^_?[a-z0-9-]{1,40}$/.test(id)) { fatal.push(`台本のファイル名は半角英小文字・数字・ハイフンにしてください：${f.path}`); continue; }
       let text; try { text = dec.decode(f.bytes); } catch { fatal.push(`文字コードがUTF-8ではありません：${f.path}`); continue; }
+      // サーバーでは書き方の確認だけを行う（全ルート検証は計算が重いため、確認画面のブラウザ側とビルド時に行う）
       const sc = E.parse(text);
-      const errs = sc.errors.length ? sc.errors.map((e) => `${e.line}行目：${e.msg}`) : E.validate(sc, { limit: 200000 }).errors.map((e) => e.msg);
-      if (errs.length) fatal.push(`台本「${f.path}」にエラーがあります：\n・${errs.slice(0, 8).join('\n・')}`);
-      else checks.push(`${f.path}：「${sc.meta.title}」SPARK ${sc.rules.S}・FATE ${sc.rules.F}、エラーなし${sc.rules.S !== 7 || sc.rules.F !== 7 ? '（基本の7：7ではありません）' : ''}`);
+      if (sc.errors.length) fatal.push(`台本「${f.path}」に書き方のエラーがあります：\n・${sc.errors.slice(0, 8).map((e) => `${e.line}行目：${e.msg}`).join('\n・')}`);
+      else scripts.push({ path: f.path, text });
     }
   }
   return {
-    target, digest, headSha, fatal, checks,
+    target, digest, headSha, fatal, checks, scripts,
     title: String(manifest.title || '').slice(0, 100), from: String(manifest.from || '').slice(0, 40), note: String(manifest.note || '').slice(0, 500),
     files, deletes,
   };
 }
 const summary = (r) => ({
   target: r.target && { id: r.target.id, name: r.target.name, color: r.target.color, site: r.target.site },
-  digest: r.digest, fatal: r.fatal, checks: r.checks || [], title: r.title, from: r.from, note: r.note,
+  digest: r.digest, fatal: r.fatal, checks: r.checks || [], scripts: r.scripts || [], title: r.title, from: r.from, note: r.note,
   files: (r.files || []).map((f) => ({ path: f.path, state: f.state, size: f.bytes.length })), deletes: r.deletes || [],
   changes: (r.files || []).filter((f) => f.state !== '変更なし').length + (r.deletes || []).filter((d) => d.state === '削除').length,
 });

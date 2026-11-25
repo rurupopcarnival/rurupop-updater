@@ -43,6 +43,10 @@ td.p{word-break:break-all}
 .hist{font-size:13px}
 .hist td:first-child{white-space:nowrap;color:var(--sub);width:1%}
 .hidden{display:none!important}
+.scr{border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin:8px 0;font-size:14px}
+.scr b{font-size:15px}
+.scr ol{margin:6px 0 0;padding-left:1.4em}
+.scr .odds{color:var(--sub);font-size:12px}
 .spin{display:inline-block;width:14px;height:14px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:sp .8s linear infinite;vertical-align:-2px;margin-right:6px}
 @keyframes sp{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.spin{animation:none}}
@@ -73,8 +77,10 @@ td.p{word-break:break-all}
   </div>
 </div>
 
+<script>/*__ENGINE__*/</script>
 <script>
 {
+const E = window.F5Engine;
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (iso) => { try { return new Date(iso).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch { return iso; } };
@@ -122,6 +128,9 @@ $('previewBtn').onclick = async () => {
   btn.disabled = false; btn.textContent = '3. 内容を確認する';
   const p = $('preview'); p.classList.remove('hidden');
   const t = j.target || target;
+  // 台本の全ルート検証はブラウザで行う
+  const scr = (j.scripts || []).map(checkScript);
+  if (scr.some((x) => x.errors.length)) (j.fatal = j.fatal || []).push('台本の全ルート検証でエラーが見つかりました（下の赤い表示）。');
   const blocked = (j.fatal || []).length > 0, none = !blocked && j.changes === 0;
   digest = blocked || none ? null : j.digest;
   p.innerHTML = `<div class="step">4. 内容を確かめて反映する</div>
@@ -129,6 +138,7 @@ $('previewBtn').onclick = async () => {
     ${j.title ? `<div><b>${esc(j.title)}</b></div>` : ''}<div class="meta">${j.from ? `作成：${esc(j.from)}　` : ''}${j.note ? esc(j.note) : ''}</div>
     ${(j.fatal || []).map((m) => `<div class="msg e">${esc(m)}</div>`).join('')}
     ${(j.checks || []).map((m) => `<div class="msg ok">${esc(m)}</div>`).join('')}
+    ${scr.map((x) => x.html).join('')}
     ${(j.files || []).length || (j.deletes || []).length ? `<table>${(j.files || []).map((f) => `<tr><td>${chip(f.state)}</td><td class="p">${esc(f.path)}</td></tr>`).join('')}${(j.deletes || []).map((d) => `<tr><td>${chip(d.state === '削除' ? '削除' : '変更なし')}</td><td class="p">${esc(d.path)}${d.state !== '削除' ? '（もともとありません）' : ''}</td></tr>`).join('')}</table>` : ''}
     ${none ? '<div class="msg w">いまの内容と同じため、反映するものはありません。</div>' : ''}
     ${blocked ? '<div class="msg e">上の問題があるため、反映できません。ZIPを作った人に確認してください。</div>' : ''}
@@ -136,6 +146,23 @@ $('previewBtn').onclick = async () => {
   if (digest) $('applyBtn').onclick = applyNow;
   p.scrollIntoView({ behavior: 'smooth', block: 'start' });
 };
+
+function checkScript(f) {
+  const sc = E.parse(f.text);
+  const R = E.validate(sc, { limit: 2000000 });
+  const errors = R.errors.map((e) => e.msg + (e.path && e.path.length ? `（例：${e.path.join(' → ')}）` : ''));
+  if (R.aborted) errors.push('全ルートの検証が最後まで終わりませんでした。ネロに相談してください。');
+  const n = E.endingOdds(sc, 1, 6), m = E.endingOdds(sc, 4, 9);
+  const pct = (v) => !v ? '0%' : v < 0.01 ? (v * 100).toFixed(2) + '%' : Math.round(v * 100) + '%';
+  const ok = !errors.length;
+  const html = `<div class="scr"><b>${esc(sc.meta.title)}</b>　<span class="odds">${esc(f.path)}／SPARK ${sc.rules.S}・FATE ${sc.rules.F}／${sc.order.length}場面</span>
+    ${ok ? `<div class="msg ok">全ルート検証：エラーなし。すべてのルートで規定回数を使い切ります${sc.rules.S !== 7 || sc.rules.F !== 7 ? '（基本の7：7ではありません）' : ''}。</div>` : errors.slice(0, 8).map((e) => `<div class="msg e">${esc(e)}</div>`).join('')}
+    ${R.warnings.map((w) => `<div class="msg w">${esc(w.msg)}</div>`).join('')}
+    <div>結末 ${sc.endings.length} 種（番号は台本の記述順で固定）</div>
+    <ol>${sc.endings.map((t) => `<li>${esc(t)}　<span class="odds">出やすさ：通常 ${pct(n[t])}／マジック ${pct(m[t])}</span></li>`).join('')}</ol>
+    <div class="odds">出やすさは、選択肢を均等に選び、ダイスをすべて同じ種類で振った場合の目安です。</div></div>`;
+  return { errors, html };
+}
 
 async function applyNow() {
   const btn = $('applyBtn'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span>反映中…';

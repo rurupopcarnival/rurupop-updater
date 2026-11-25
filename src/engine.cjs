@@ -164,6 +164,9 @@
     if (cur && !cur.next) err(cur.line, `場面「${cur.name}」の最後に行き先（→ / ? / !）がありません`);
     if (!sc.order.length) err(1, '場面が1つもありません（# 場面名 で始めてください）');
     sc.start = sc.order[0];
+    // 結末番号：台本に書かれた順に、結末名ごとに 1, 2, 3… と固定で割り振る（同じ結末名は同じ番号）
+    sc.endings = [];
+    for (const n of sc.order) { const nx = sc.scenes[n].next; if (nx && nx.type === 'end' && !sc.endings.includes(nx.title)) sc.endings.push(nx.title); }
     checkStatic(sc);
     return sc;
   }
@@ -327,7 +330,7 @@
         const r = nx.rules.find((r) => !r.cond || evalCond(sc, state, r.cond));
         applyEffects(sc, state, r.effects, null, warn); go(state, r.target); continue;
       }
-      if (nx.type === 'end') { state.ended = nx.title; return { type: 'end', title: nx.title, pages }; }
+      if (nx.type === 'end') { state.ended = nx.title; return { type: 'end', title: nx.title, no: sc.endings.indexOf(nx.title) + 1, total: sc.endings.length, pages }; }
       return { type: nx.type, node: nx, scene: s.name, pages };
     }
   }
@@ -347,6 +350,34 @@
   }
 
   // ---------- 全ルート検証 ----------
+  // 進行に影響する履歴だけを状態に含める（差分テキストだけで参照される履歴は進行に影響しない）。
+  // さらに、選択番号・出目は「分岐条件の結果が同じになる値」どうしを同じものとして扱う（例：<=3 なら 1〜3 と 4〜9）。
+  function flowClasses(sc) {
+    const atoms = {}; // 'c:場面' / 'd:場面' → [{op, n}] or 'exact'
+    const termKey = (t) => (t.k === 'choice' || t.k === 'dice') ? `${t.k === 'choice' ? 'c' : 'd'}:${sc.alias[t.v] || t.v}` : null;
+    for (const name of sc.order) {
+      const nx = sc.scenes[name].next;
+      if (!nx || nx.type !== 'branch') continue;
+      for (const r of nx.rules) if (r.cond) for (const a of r.cond.or.flat()) {
+        const kl = termKey(a.l), kr = termKey(a.r);
+        if (kl && a.r.k === 'num') (atoms[kl] = atoms[kl] === 'exact' ? 'exact' : (atoms[kl] || [])).push?.({ op: a.op, n: a.r.v });
+        else if (kr && a.l.k === 'num') (atoms[kr] = atoms[kr] === 'exact' ? 'exact' : (atoms[kr] || [])).push?.({ op: flip(a.op), n: a.l.v });
+        else { if (kl) atoms[kl] = 'exact'; if (kr) atoms[kr] = 'exact'; }
+      }
+    }
+    return atoms;
+  }
+  function flip(op) { return { '>=': '<=', '<=': '>=', '>': '<', '<': '>' }[op] || op; }
+  function cmp(l, op, r) { switch (op) { case '>=': return l >= r; case '<=': return l <= r; case '>': return l > r; case '<': return l < r; case '!=': return l !== r; default: return l === r; } }
+  function historyKey(sc, atoms, state) {
+    const parts = [];
+    for (const k in atoms) {
+      const [t, scene] = [k[0], k.slice(2)];
+      const v = (t === 'c' ? state.choice[scene] : state.dice[scene]) || 0;
+      parts.push(atoms[k] === 'exact' ? v : atoms[k].map((a) => (cmp(v, a.op, a.n) ? 1 : 0)).join(''));
+    }
+    return parts.join(',');
+  }
   function validate(sc, opts = {}) {
     const R = { errors: [], warnings: [], info: [], arrivals: {}, endings: {}, routes: 0, reachable: new Set(), normalReachable: new Set(), statesVisited: 0, aborted: false };
     if (sc.errors.length) return R;
@@ -357,10 +388,9 @@
     const boundWarn = (e, kind) => addWarn(`b${e.line}${kind}`, `${e.line}行目：ステータス「${e.name}」が${kind === 'min' ? '下限' : '上限'}を超える可能性があります（自動で範囲内に調整されます）`);
     const memo = new Map();
 
+    const atoms = flowClasses(sc);
     function key(state, normalOK) {
-      const ch = [...sc.refChoice].map((k) => state.choice[k] || 0).join(',');
-      const di = [...sc.refDice].map((k) => state.dice[k] || 0).join(',');
-      return `${state.scene}|${state.idx}|${state.s}|${state.f}|${JSON.stringify(state.st)}|${ch}|${di}|${normalOK ? 1 : 0}`;
+      return `${state.scene}|${state.idx}|${state.s}|${state.f}|${JSON.stringify(state.st)}|${historyKey(sc, atoms, state)}|${normalOK ? 1 : 0}`;
     }
     // 戻り値：{ ending名: ルート数 }
     function explore(state, path, normalOK) {
@@ -413,6 +443,24 @@
     return R;
   }
 
-  const API = { parse, validate, newState, advance, chooseSpark, confirmFate, renderText, clone };
+  // 結末ごとの出やすさ（選択肢は均等に選ぶと仮定、ダイスは lo〜hi が均等）
+  function endingOdds(sc, lo = 1, hi = 6) {
+    const atoms = flowClasses(sc), memo = new Map();
+    function rec(state) {
+      const r = advance(sc, state);
+      const k = `${state.scene}|${state.idx}|${state.s}|${state.f}|${JSON.stringify(state.st)}|${historyKey(sc, atoms, state)}`;
+      if (memo.has(k)) return memo.get(k);
+      let res = {};
+      const add = (b, w) => { for (const x in b) res[x] = (res[x] || 0) + b[x] * w; };
+      if (r.type === 'end') res = { [r.title]: 1 };
+      else if (r.type === 'spark') r.node.choices.forEach((c, i) => { const ns = clone(state); chooseSpark(sc, ns, i); add(rec(ns), 1 / r.node.choices.length); });
+      else if (r.type === 'fate') for (let v = lo; v <= hi; v++) { const ns = clone(state); confirmFate(sc, ns, v); add(rec(ns), 1 / (hi - lo + 1)); }
+      memo.set(k, res);
+      return res;
+    }
+    return rec(newState(sc));
+  }
+
+  const API = { parse, validate, endingOdds, newState, advance, chooseSpark, confirmFate, renderText, clone };
   if (typeof module !== 'undefined') module.exports = API; else root.F5Engine = API;
 })(this);
