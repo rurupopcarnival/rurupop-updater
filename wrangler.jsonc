@@ -7,8 +7,8 @@
   "routes": [{ "pattern": "update.rurupop.com", "custom_domain": true }],
   "vars": {
     "CF_ACCOUNT_ID": "28ee49cf457ae3b7d3cfdc46859d951f",
-    "ACCESS_TEAM_DOMAIN": "REPLACE_ME.cloudflareaccess.com",
-    "ACCESS_AUD": "REPLACE_ME"
+    "ACCESS_TEAM_DOMAIN": "little-rain-4859.cloudflareaccess.com",
+    "ACCESS_AUD": "2dd87167c7d25e4a9d82245dfd37951eeb34870ea9533cf792fb8877b1c47abc"
   }
   // シークレット（ここには書かない）：GITHUB_TOKEN（対象リポジトリの Contents 読み書き）, CF_API_TOKEN（Workers Builds の読み取り）
 }
