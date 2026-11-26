@@ -245,7 +245,7 @@
 
   // ---------- 本文の部分色（v0.4）：{色 赤}対象{/色}／{色 #RRGGBB}対象{/色} ----------
   // 色名は読みやすさと見分けやすさを確かめた固定の組。#RRGGBB は背景との差（コントラスト比）4.5：1以上のみ使える
-  const COLOR_NAMES = { 赤: '#C62828', 橙: '#B45309', 緑: '#2E7D32', 青緑: '#00796B', 青: '#1565C0', 紫: '#6A1B9A', 桃: '#AD1457', 灰: '#5F6368' };
+  const COLOR_NAMES = { 赤: '#C62828', 橙: '#A84A00', 緑: '#2E7D32', 青緑: '#00796B', 青: '#1565C0', 紫: '#6A1B9A', 桃: '#AD1457', 灰: '#5F6368' };
   const COLOR_BG = ['#FFFFFF', '#F6F3FB', '#FFF0EB', '#EEF0FF']; // βの本文・説明欄・選択中の背景
   const lum = (h) => { const c = [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)); return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
   const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
@@ -486,6 +486,44 @@
     }
     return live;
   }
+  // 値の飽和：この先の分岐条件の境目より十分大きい（小さい）値は、同じものとして扱える。
+  // 場面ごとに「この先で最大どれだけ減る／増えるか」を求め、境目＋その量を超えた値をまとめる
+  function satBounds(sc) {
+    const T = {}, ok = {};
+    for (const n of sc.statusOrder) { T[n] = []; ok[n] = true; }
+    for (const name of sc.order) {
+      const nx = sc.scenes[name].next; if (!nx || nx.type !== 'branch') continue;
+      for (const r of nx.rules) if (r.cond) for (const a of r.cond.or.flat()) {
+        if (a.l.k === 'status' && a.r.k === 'num') T[a.l.v] && T[a.l.v].push(a.r.v);
+        else if (a.r.k === 'status' && a.l.k === 'num') T[a.r.v] && T[a.r.v].push(a.l.v);
+        else for (const t of [a.l, a.r]) if (t.k === 'status') ok[t.v] = false;
+      }
+    }
+    const eff = (list, n) => { let up = 0, dn = 0; for (const e of list || []) if (e.name === n) { const v = e.value === 'DICE' ? 9 : e.value; if (e.op === '+') up += v; else if (e.op === '-') dn += v; } return [up, dn]; };
+    const out = {};
+    for (const n of sc.statusOrder) {
+      if (!ok[n] || !T[n].length) continue;
+      const U = {}, D = {}; for (const name of sc.order) { U[name] = 0; D[name] = 0; }
+      let changed = true, guard = 0;
+      while (changed && guard++ < 500) {
+        changed = false;
+        for (const name of sc.order) {
+          const s = sc.scenes[name], nx = s.next; let u0 = 0, d0 = 0;
+          for (const it of s.items) if (it.type === 'effect') { const [u, d] = eff(it.effects, n); u0 += u; d0 += d; }
+          let bu = 0, bd = 0;
+          const trans = nx ? (nx.type === 'goto' ? [{ effects: nx.effects, target: nx.target }] : (nx.rules || nx.choices || nx.bands || [])) : [];
+          for (const t of trans) { const [u, d] = eff(t.effects, n); const tu = u + (U[t.target] || 0), td = d + (D[t.target] || 0); if (tu > bu) bu = tu; if (td > bd) bd = td; }
+          const nu = u0 + bu, nd = d0 + bd;
+          if (nu !== U[name] || nd !== D[name]) { U[name] = nu; D[name] = nd; changed = true; }
+        }
+      }
+      if (changed) continue; // 循環などで上限が決まらない場合は飽和させない
+      out[n] = {};
+      const lo = Math.min(...T[n]), hi = Math.max(...T[n]);
+      for (const name of sc.order) out[n][name] = [lo - U[name] - 1, hi + D[name] + 1];
+    }
+    return out;
+  }
   function stKey(st, rel) { const o = {}; for (const k in st) if (rel.has(k)) o[k] = st[k]; return JSON.stringify(o); }
   function flip(op) { return { '>=': '<=', '<=': '>=', '>': '<', '<': '>' }[op] || op; }
   function cmp(l, op, r) { switch (op) { case '>=': return l >= r; case '<=': return l <= r; case '>': return l > r; case '<': return l < r; case '!=': return l !== r; default: return l === r; } }
@@ -509,17 +547,31 @@
     const boundWarn = (e, kind) => addWarn(`b${e.line}${kind}`, `${e.line}行目：ステータス「${e.name}」が${kind === 'min' ? '下限' : '上限'}を超える可能性があります（自動で範囲内に調整されます）`);
     const memo = new Map();
 
-    const atoms = flowClasses(sc), live = liveSets(sc), relOf = {};
-    for (const n of sc.order) relOf[n] = new Set([...live[n]].filter((x) => x.startsWith('s:')).map((x) => x.slice(2)));
+    const atoms = flowClasses(sc), live = liveSets(sc), relOf = {}, relArr = {}, irrArr = {}, trackArr = {}, histKeyOf = {};
+    for (const n of sc.order) {
+      relOf[n] = new Set([...live[n]].filter((x) => x.startsWith('s:')).map((x) => x.slice(2)));
+      relArr[n] = sc.statusOrder.filter((k) => relOf[n].has(k));
+      irrArr[n] = sc.statusOrder.filter((k) => !relOf[n].has(k));
+      trackArr[n] = sc.statusOrder; // 範囲超過の警告用に最小・最大を追う（飽和でまとめた値も含む）
+      // 履歴の分類（その場面以降で読まれるものだけ）。比較結果の並びを文字列にする
+      histKeyOf[n] = Object.keys(atoms).filter((k) => live[n].has(k)).map((k) => ({ c: k[0] === 'c', scene: k.slice(2), a: atoms[k] }));
+    }
+    const sat = satBounds(sc);
     function key(state, normalOK) {
-      return `${state.scene}|${state.idx}|${state.s}|${state.f}|${stKey(state.st, relOf[state.scene])}|${historyKey(sc, atoms, state, live[state.scene])}|${normalOK ? 1 : 0}`;
+      const sn = state.scene; let k = sn + '|' + state.idx + '|' + state.s + '|' + state.f + '|' + (normalOK ? 1 : 0) + '|';
+      for (const n of relArr[sn]) { let v = state.st[n]; const b = sat[n] && sat[n][sn]; if (b) { if (v < b[0]) v = b[0]; else if (v > b[1]) v = b[1]; } k += v + ','; }
+      k += '|';
+      for (const h of histKeyOf[sn]) {
+        const v = (h.c ? state.choice[h.scene] : state.dice[h.scene]) || 0;
+        if (h.a === 'exact') k += v + ','; else { for (const a of h.a) k += cmp(v, a.op, a.n) ? '1' : '0'; k += ','; }
+      }
+      return k;
     }
     // 進行に影響しないステータスは状態キーから外す。範囲超過の警告を取りこぼさないよう、
     // 同じ状態でも「これまでより小さい／大きい値」で来た場合だけ再探索する（効果は単調なので最小・最大で十分）。
     function within(m, st, scene) {
-      const rel = relOf[scene];
       let ok = true;
-      for (const k in st) if (!rel.has(k)) {
+      for (const k of trackArr[scene]) {
         if (!(k in m.lo) || st[k] < m.lo[k]) { m.lo[k] = st[k]; ok = false; }
         if (!(k in m.hi) || st[k] > m.hi[k]) { m.hi[k] = st[k]; ok = false; }
       }
@@ -532,7 +584,7 @@
       const r = advance(sc, state, boundWarn, true);
       for (const t of state.trail) {
         R.reachable.add(t); if (normalOK) R.normalReachable.add(t);
-        (R.arrivals[t] ||= new Set()).add(`S${state.s}/F${state.f}`);
+        (R.arrivals[t] ||= new Set()).add(state.s * 1000 + state.f);
       }
       delete state.trail;
       const k = key(state, normalOK);
@@ -573,7 +625,7 @@
       if (!R.reachable.has(name)) R.warnings.push({ msg: `場面「${name}」にはどのルートからも到達できません` });
       else if (!R.normalReachable.has(name)) R.info.push({ msg: `場面「${name}」は通常ダイス（1〜6）だけでは到達できません` });
       const a = R.arrivals[name];
-      if (a && a.size > 1) R.warnings.push({ msg: `場面「${name}」に異なる消費数で合流しています（${[...a].join('、')}）` });
+      if (a && a.size > 1) R.warnings.push({ msg: `場面「${name}」に異なる消費数で合流しています（${[...a].map((x) => `S${Math.floor(x / 1000)}/F${x % 1000}`).join("、")}）` });
     }
     return R;
   }
