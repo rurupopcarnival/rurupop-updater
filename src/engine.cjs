@@ -89,6 +89,25 @@
         cur.next.desc.push(line.slice(1).trim());
         return;
       }
+      // FATEのプレイヤー向け表示行（v0.3）：「= 範囲｜文」「= ?範囲｜文」「= ?｜文」「= それ以外｜文」「= なし」
+      // 内部の判定（出目の行）とは独立。1行でもあれば、決定画面はこの表示行だけで作る
+      if (mode === 'fate' && (line.startsWith('=') || line.startsWith('＝'))) {
+        const nx = cur.next, body = line.slice(1).trim();
+        nx.display = nx.display || [];
+        if (body === 'なし') { nx.display.push({ kind: 'none', line: ln }); return; }
+        const i = body.search(/[｜|]/);
+        if (i < 0) { err(ln, '表示行は「= 範囲｜文」の形で書いてください（例：= 1-3｜脱出、= ?｜🔒、= それ以外｜🔒、= なし）'); return; }
+        const rng = Z2H(body.slice(0, i).trim()).replace(/？/g, '?'), text = body.slice(i + 1).trim();
+        if (!text) { err(ln, '表示行の「｜」の後に表示する文を書いてください（伏せる場合は 🔒）'); return; }
+        if (rng === 'それ以外') { nx.display.push({ kind: 'else', text, line: ln }); return; }
+        if (rng === '?') { nx.display.push({ kind: 'any', text, line: ln }); return; }
+        const m = rng.match(/^(\?)?(\d)(?:\s*[-~〜～]\s*(\d))?$/);
+        if (!m) { err(ln, `表示行の範囲「${rng}」が読めません（例：1-3、?1-3、?、それ以外）`); return; }
+        const lo = +m[2], hi = m[3] ? +m[3] : lo;
+        if (lo < 1 || hi > 9 || lo > hi) { err(ln, '表示行の範囲は1〜9で書いてください'); return; }
+        nx.display.push({ kind: m[1] ? 'hidden' : 'show', lo, hi, text, line: ln });
+        return;
+      }
       // 選択肢・出目・分岐の行
       if (mode && (line.startsWith('-') || /^[0-9０-９]/.test(line))) {
         const nx = cur.next;
@@ -206,7 +225,7 @@
         if (it.type === 'page') for (const r of textRefs(it.text)) fn(r, it.line, s);
       }
       const nx = s.next; if (!nx) continue;
-      for (const t of [...(nx.desc || []), ...(nx.choices || []).map((c) => c.hint || ''), ...(nx.bands || []).map((b) => b.label || '')])
+      for (const t of [...(nx.desc || []), ...(nx.choices || []).map((c) => c.hint || ''), ...(nx.bands || []).map((b) => b.label || ''), ...(nx.display || []).map((x) => x.text || '')])
         for (const r of textRefs(t)) fn(r, nx.line, s);
       if (nx.effects) effs.push(...nx.effects);
       (nx.choices || []).forEach((c) => effs.push(...c.effects));
@@ -247,6 +266,14 @@
         for (let v = 1; v <= 9; v++) { if (!cover[v]) miss.push(v); if (cover[v] > 1) dup.push(v); }
         if (miss.length) err(nx.line, `FATE「${nx.title}」で出目 ${miss.join('・')} の行き先がありません`);
         if (dup.length) err(nx.line, `FATE「${nx.title}」で出目 ${dup.join('・')} が重複しています`);
+        if (nx.display) {
+          const d = nx.display, used = Array(10).fill(0);
+          if (d.some((x) => x.kind === 'none') && d.length > 1) err(nx.line, `FATE「${nx.title}」：「= なし」はほかの表示行と一緒に使えません`);
+          if (d.filter((x) => x.kind === 'else').length > 1) err(nx.line, `FATE「${nx.title}」：「= それ以外」は1行だけにしてください`);
+          d.forEach((x) => { if (x.lo) for (let v = x.lo; v <= x.hi; v++) used[v]++; });
+          const ov = []; for (let v = 1; v <= 9; v++) if (used[v] > 1) ov.push(v);
+          if (ov.length) err(nx.line, `FATE「${nx.title}」：表示行の範囲で出目 ${ov.join('・')} が重なっています`);
+        }
       }
       if (nx.type === 'branch') {
         nx.rules.forEach((r) => tgt(r.target, r.line));
