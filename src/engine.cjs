@@ -316,14 +316,14 @@
 
   // 次の「決定」（SPARK・FATE・END）まで進める。pages を集めて返す
   function advance(sc, state, warn, quiet) {
-    const pages = [];
+    const pages = [], snaps = [];
     let guard = 0;
     while (true) {
-      if (++guard > 2000) return { type: 'loop', pages };
+      if (++guard > 2000) return { type: 'loop', pages, snaps };
       const s = sc.scenes[state.scene];
       while (state.idx < s.items.length) {
         const it = s.items[state.idx++];
-        if (it.type === 'page') { if (quiet) continue; const t = renderText(sc, state, it.text); if (t.trim()) pages.push(t); }
+        if (it.type === 'page') { if (quiet) continue; const t = renderText(sc, state, it.text); if (t.trim()) { pages.push(t); snaps.push({ st: { ...state.st }, vis: { ...state.vis } }); } }
         else if (it.type === 'show') state.vis[it.name] = true;
         else if (it.type === 'hide') state.vis[it.name] = false;
         else if (it.type === 'effect') applyEffects(sc, state, it.effects, null, warn);
@@ -334,8 +334,8 @@
         const r = nx.rules.find((r) => !r.cond || evalCond(sc, state, r.cond));
         applyEffects(sc, state, r.effects, null, warn); go(state, r.target); continue;
       }
-      if (nx.type === 'end') { state.ended = nx.title; return { type: 'end', title: nx.title, no: sc.endings.indexOf(nx.title) + 1, total: sc.endings.length, pages }; }
-      return { type: nx.type, node: nx, scene: s.name, pages };
+      if (nx.type === 'end') { state.ended = nx.title; return { type: 'end', title: nx.title, no: sc.endings.indexOf(nx.title) + 1, total: sc.endings.length, pages, snaps }; }
+      return { type: nx.type, node: nx, scene: s.name, pages, snaps };
     }
   }
   function go(state, target) { state.scene = target; state.idx = 0; if (state.trail) state.trail.push(target); }
