@@ -238,13 +238,69 @@
     const out = [];
     const re = /\{もし\s+([^}]+)\}/g; let m;
     while ((m = re.exec(text))) { const c = parseCond(m[1], 0, () => {}); if (c) c.or.flat().forEach((a) => out.push(a.l, a.r)); }
-    const re2 = /\{(?!もし|でなければ|\/もし)([^}]+)\}/g;
+    const re2 = /\{(?!もし|でなければ|\/もし|色[\s　]|\/色\})([^}]+)\}/g;
     while ((m = re2.exec(text))) out.push(parseTerm(m[1]));
     return out;
   }
 
+  // ---------- 本文の部分色（v0.4）：{色 赤}対象{/色}／{色 #RRGGBB}対象{/色} ----------
+  // 色名は読みやすさと見分けやすさを確かめた固定の組。#RRGGBB は背景との差（コントラスト比）4.5：1以上のみ使える
+  const COLOR_NAMES = { 赤: '#C62828', 橙: '#B45309', 緑: '#2E7D32', 青緑: '#00796B', 青: '#1565C0', 紫: '#6A1B9A', 桃: '#AD1457', 灰: '#5F6368' };
+  const COLOR_BG = ['#FFFFFF', '#F6F3FB', '#FFF0EB', '#EEF0FF']; // βの本文・説明欄・選択中の背景
+  const lum = (h) => { const c = [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)); return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
+  const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+  function colorOf(tok) {
+    const t = Z2H(String(tok).trim()).replace(/＃/g, '#');
+    if (COLOR_NAMES[t]) return { hex: COLOR_NAMES[t], ratio: Math.min(...COLOR_BG.map((b) => contrast(COLOR_NAMES[t], b))) };
+    if (!/^#[0-9A-Fa-f]{6}$/.test(t)) return null;
+    const hex = t.toUpperCase();
+    return { hex, ratio: Math.min(...COLOR_BG.map((b) => contrast(hex, b))) };
+  }
+  const COLOR_TAG = /\{(色[\s　]+[^}]*|\/色)\}/g;
+  // 色指定の書き間違いを調べる（入れ子・閉じ忘れ・色の値・読みにくい色）
+  function colorProblems(text) {
+    const out = [];
+    const scan = (t, where) => {
+      let depth = 0;
+      for (const m of t.matchAll(COLOR_TAG)) {
+        if (m[1] === '/色') { if (!depth) out.push(`${where}{/色} に対応する {色 …} がありません`); else depth--; continue; }
+        if (depth) out.push(`${where}色指定の中に、さらに色指定は入れられません`);
+        depth++;
+        const tok = m[1].replace(/^色[\s　]+/, ''), c = colorOf(tok);
+        if (!c) out.push(`色「${tok}」が読めません（使える色：${Object.keys(COLOR_NAMES).join('・')}、または #RRGGBB）`);
+        else if (c.ratio < 4.5) out.push(`色「${tok}」は背景との差が小さく読みにくいため使えません（コントラスト比 ${c.ratio.toFixed(1)}：1。4.5：1以上が必要です）`);
+      }
+      if (depth) out.push(`${where}{色 …} が {/色} で閉じられていません`);
+    };
+    scan(t0(text), '');
+    // 条件付き本文の中では、色指定をその中で閉じる（条件で片方だけ消えて崩れないように）
+    for (const m of text.matchAll(/\{もし\s+[^}]+\}([\s\S]*?)(?:\{でなければ\}([\s\S]*?))?\{\/もし\}/g)) {
+      for (const body of [m[1], m[2]]) if (body && !balanced(body)) out.push('{もし …}〜{/もし} の中の色指定は、その中で閉じてください');
+    }
+    return [...new Set(out)];
+  }
+  const t0 = (t) => t;
+  function balanced(t) { let d = 0; for (const m of t.matchAll(COLOR_TAG)) { d += m[1] === '/色' ? -1 : 1; if (d < 0) return false; } return d === 0; }
+  // 画面用：エスケープ済みの文字列の色指定を <span> にする（色は検証済みの値だけを使う）
+  function decorate(html) {
+    return String(html).replace(/\{色[\s　]+([^}]*)\}([\s\S]*?)\{\/色\}/g, (_, tok, body) => {
+      const c = colorOf(tok);
+      return c && c.ratio >= 4.5 ? `<span class="tc" style="color:${c.hex}">${body}</span>` : body;
+    }).replace(COLOR_TAG, '');
+  }
+  // 記録や送信用：色指定を外した文字列
+  const stripDeco = (t) => String(t).replace(COLOR_TAG, '');
+
   function checkStatic(sc) {
     const err = (ln, m) => sc.errors.push({ line: ln, msg: m });
+    for (const name of sc.order) {
+      const s = sc.scenes[name], nx = s.next;
+      for (const it of s.items) if (it.type === 'page') colorProblems(it.text).forEach((m) => err(it.line, m));
+      if (nx) for (const t of [...(nx.desc || []), ...(nx.choices || []).flatMap((c) => [c.label, c.hint || '']), ...(nx.bands || []).map((b) => b.label || ''), ...(nx.display || []).map((x) => x.text || '')])
+        colorProblems(t).forEach((m) => err(nx.line, m));
+      if (nx && nx.type === 'end' && COLOR_TAG.test(nx.title)) err(nx.line, '結末名には色指定を使えません');
+      COLOR_TAG.lastIndex = 0;
+    }
     sc.refChoice = new Set(); sc.refDice = new Set();
     // 選択()・出目() は場面名でも SPARK/FATE の見出しでも参照できる
     sc.alias = {};
@@ -337,7 +393,8 @@
       const cond = parseCond(c, 0, () => {});
       return cond && evalCond(sc, state, cond) ? a : (b || '');
     });
-    out = out.replace(/\{([^}]+)\}/g, (_, t) => String(termVal(sc, state, parseTerm(t))));
+    // {色 …}{/色} は値の差し込みではないのでそのまま残す（画面側で decorate する）
+    out = out.replace(/\{([^}]+)\}/g, (m, t) => (/^(色[\s　]|\/色$)/.test(t) ? m : String(termVal(sc, state, parseTerm(t)))));
     return out.replace(/^\n+|\n+$/g, '');
   }
 
@@ -540,6 +597,6 @@
     return rec(newState(sc));
   }
 
-  const API = { parse, validate, endingOdds, newState, advance, chooseSpark, confirmFate, renderText, clone };
+  const API = { parse, validate, endingOdds, newState, advance, chooseSpark, confirmFate, renderText, clone, decorate, stripDeco, colorOf, COLOR_NAMES };
   if (typeof module !== 'undefined') module.exports = API; else root.F5Engine = API;
 })(this);
